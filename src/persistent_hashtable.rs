@@ -1,17 +1,15 @@
 use std::cmp::Ordering;
 use std::collections::hash_map::DefaultHasher;
-use std::ffi::{OsStr, OsString};
+use std::ffi::OsString;
 use std::hash::{Hash, Hasher};
-use std::io::SeekFrom;
 use std::path::PathBuf;
-use std::sync::Arc;
 
 use thiserror::Error;
-use tokio::fs::{File, OpenOptions};
-use tokio::io::{AsyncReadExt, AsyncSeekExt};
-use tokio::sync::{Mutex, RwLock};
+use tokio::fs::OpenOptions;
+use tokio::io::AsyncReadExt;
+use tokio::sync::RwLock;
 
-use crate::storage_file::{ENTRY_LEN, FILE_SIZE, KEY_VALUE_LEN, KeyValue, StorageFile};
+use crate::storage_file::{FILE_SIZE, KeyValue, StorageFile};
 
 const SPLIT_EXPONENT: usize = 2;
 const SPLIT_FACTOR: usize = 1usize << SPLIT_EXPONENT;
@@ -111,7 +109,7 @@ impl PersistentHashtable {
                 if num != file_num {
                     return Err(ParseHashtableError::InvalidItemError(entry.path()));
                 }
-                let mut file = OpenOptions::new()
+                let file = OpenOptions::new()
                     .read(true)
                     .write(true)
                     .custom_flags(libc::O_DIRECT)

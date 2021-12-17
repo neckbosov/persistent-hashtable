@@ -1,6 +1,5 @@
 use std::io::SeekFrom;
 
-use bytes::{Bytes, BytesMut};
 use tokio::fs::File;
 use tokio::io::{AsyncReadExt, AsyncSeekExt, AsyncWriteExt};
 
@@ -20,7 +19,7 @@ pub struct StorageFile {
 }
 
 impl StorageFile {
-    pub async fn new(mut file: File) -> Result<StorageFile, tokio::io::Error> {
+    pub async fn new(file: File) -> Result<StorageFile, tokio::io::Error> {
         Ok(Self { file })
     }
     pub async fn read(&self, pos: u64) -> Result<Option<KeyValue>, tokio::io::Error> {

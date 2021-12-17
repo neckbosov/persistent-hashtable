@@ -1,14 +1,13 @@
 use std::sync::Arc;
 
-use libc::mode_t;
 use prost::Message;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::tcp::{OwnedReadHalf, OwnedWriteHalf};
 use tokio::net::TcpStream;
-use tokio::sync::{broadcast, mpsc, Mutex};
+use tokio::sync::{broadcast, Mutex};
 
 use crate::kv::*;
-use crate::persistent_hashtable::{DataStorageOperationError, PersistentHashtable};
+use crate::persistent_hashtable::PersistentHashtable;
 use crate::rpc::{GET_RESPONSE, parse_request, ParseRequestError, PUT_RESPONSE, Request};
 
 #[derive(Debug, thiserror::Error)]
@@ -94,7 +93,7 @@ impl StreamHandler {
 async fn handle_request(
     request: Request,
     hashtable: Arc<PersistentHashtable>,
-    shutdown: broadcast::Receiver<()>,
+    _shutdown: broadcast::Receiver<()>,
     output_stream: Arc<Mutex<OwnedWriteHalf>>,
 ) {
     match request {
