@@ -136,7 +136,7 @@ impl PersistentHashtable {
         let file_num = (pos & SPLIT_MASK) as usize;
         let file_guard = self.files[file_num].read().await;
         file_guard
-            .read(pos >> SPLIT_EXPONENT as u64)
+            .read(pos >> SPLIT_EXPONENT as u64, key)
             .await
             .map(|kv| kv.map(|kv| kv.value).unwrap_or(0))
             .map_err(|err| err.into())

@@ -4,7 +4,7 @@ use prost::Message;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::tcp::{OwnedReadHalf, OwnedWriteHalf};
 use tokio::net::TcpStream;
-use tokio::sync::{broadcast, Mutex};
+use tokio::sync::{broadcast, Mutex, watch};
 
 use crate::kv::*;
 use crate::persistent_hashtable::PersistentHashtable;
@@ -22,19 +22,20 @@ pub struct StreamHandler {
     stream_reader: OwnedReadHalf,
     stream_writer: Arc<Mutex<OwnedWriteHalf>>,
     hashtable: Arc<PersistentHashtable>,
-    shutdown: broadcast::Receiver<()>,
-    inner_sender: broadcast::Sender<()>,
+    shutdown: watch::Receiver<()>,
+    inner_sender: watch::Sender<()>,
+    inner_receiver: watch::Receiver<()>,
     // db_error_sender: mpsc::UnboundedSender<DataStorageOperationError>,
-    // db_error_receiver: mpsc::UnboundedReceiver<DataStorageOperationError>,
+    // db_error_receiver: mpsc::UnboundedReceiver<DataStorageOperationError>
 }
 
 impl StreamHandler {
     pub fn new(
         stream: TcpStream,
         hashtable: Arc<PersistentHashtable>,
-        shutdown: broadcast::Receiver<()>,
+        shutdown: watch::Receiver<()>,
     ) -> Self {
-        let (inner_sender, _) = broadcast::channel(1);
+        let (inner_sender, inner_receiver) = watch::channel(());
         // let (db_error_sender, db_error_receiver) = mpsc::unbounded_channel();
         let (read_half, write_half) = stream.into_split();
         Self {
@@ -43,6 +44,7 @@ impl StreamHandler {
             hashtable,
             shutdown,
             inner_sender,
+            inner_receiver,
             // db_error_sender,
             // db_error_receiver,
         }
@@ -53,7 +55,7 @@ impl StreamHandler {
                 request_type = self.stream_reader.read_u8() => {
                     request_type?
                 }
-                _ = self.shutdown.recv() => {
+                _ = self.shutdown.changed() => {
                     self.inner_sender.send(()).unwrap();
                     return Ok(());
                 }
@@ -62,7 +64,7 @@ impl StreamHandler {
                 request_len = self.stream_reader.read_u32() => {
                     request_len?
                 }
-                _ = self.shutdown.recv() => {
+                _ = self.shutdown.changed() => {
                     self.inner_sender.send(()).unwrap();
                     return Ok(());
                 }
@@ -72,17 +74,20 @@ impl StreamHandler {
                 read_result = self.stream_reader.read_exact(&mut buf) => {
                     read_result?;
                 }
-                _ = self.shutdown.recv() => {
+                _ = self.shutdown.changed() => {
                     self.inner_sender.send(()).unwrap();
                     return Ok(());
                 }
             }
             let request = parse_request(request_type, buf)?;
-            let shutdown = self.inner_sender.subscribe();
+            let mut shutdown = self.inner_receiver.clone();
             let output_stream = Arc::clone(&self.stream_writer);
             let hashtable = Arc::clone(&self.hashtable);
             tokio::spawn(async move {
-                handle_request(request, hashtable, shutdown, output_stream).await;
+                tokio::select! {
+                    _ = handle_request(request, hashtable,  output_stream) => {}
+                    _ = shutdown.changed() => {}
+                }
             });
         }
     }
@@ -91,7 +96,6 @@ impl StreamHandler {
 async fn handle_request(
     request: Request,
     hashtable: Arc<PersistentHashtable>,
-    _shutdown: broadcast::Receiver<()>,
     output_stream: Arc<Mutex<OwnedWriteHalf>>,
 ) {
     match request {
@@ -108,7 +112,10 @@ async fn handle_request(
             (*stream).write_all(&buf).await.unwrap();
         }
         Request::Put(put_request) => {
-            hashtable.set(put_request.key, put_request.offset).await.unwrap();
+            hashtable
+                .set(put_request.key, put_request.offset)
+                .await
+                .unwrap();
             let response = TPutResponse {
                 request_id: put_request.request_id,
             };
