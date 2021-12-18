@@ -1,10 +1,11 @@
+use std::io::Cursor;
 use std::sync::Arc;
 
 use prost::Message;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::tcp::{OwnedReadHalf, OwnedWriteHalf};
 use tokio::net::TcpStream;
-use tokio::sync::{broadcast, Mutex, watch};
+use tokio::sync::{broadcast, Mutex, RwLock, watch};
 
 use crate::kv::*;
 use crate::persistent_hashtable::PersistentHashtable;
@@ -19,9 +20,8 @@ pub enum StreamHandleError {
 }
 
 pub struct StreamHandler {
-    stream_reader: OwnedReadHalf,
-    stream_writer: Arc<Mutex<OwnedWriteHalf>>,
-    hashtable: Arc<PersistentHashtable>,
+    stream: TcpStream,
+    hashtable: Arc<RwLock<PersistentHashtable>>,
     shutdown: watch::Receiver<()>,
     inner_sender: watch::Sender<()>,
     inner_receiver: watch::Receiver<()>,
@@ -31,16 +31,15 @@ pub struct StreamHandler {
 
 impl StreamHandler {
     pub fn new(
-        stream: TcpStream,
-        hashtable: Arc<PersistentHashtable>,
+        mut stream: TcpStream,
+        hashtable: Arc<RwLock<PersistentHashtable>>,
         shutdown: watch::Receiver<()>,
     ) -> Self {
         let (inner_sender, inner_receiver) = watch::channel(());
+        stream.set_nodelay(true);
         // let (db_error_sender, db_error_receiver) = mpsc::unbounded_channel();
-        let (read_half, write_half) = stream.into_split();
         Self {
-            stream_reader: read_half,
-            stream_writer: Arc::new(Mutex::new(write_half)),
+            stream,
             hashtable,
             shutdown,
             inner_sender,
@@ -49,29 +48,34 @@ impl StreamHandler {
             // db_error_receiver,
         }
     }
-    pub async fn run(&mut self) -> Result<(), StreamHandleError> {
-        loop {
-            let request_type: u8 = tokio::select! {
-                request_type = self.stream_reader.read_u8() => {
-                    request_type?
-                }
-                _ = self.shutdown.changed() => {
-                    self.inner_sender.send(()).unwrap();
-                    return Ok(());
-                }
-            };
-            let request_len: u32 = tokio::select! {
-                request_len = self.stream_reader.read_u32() => {
-                    request_len?
-                }
-                _ = self.shutdown.changed() => {
-                    self.inner_sender.send(()).unwrap();
-                    return Ok(());
-                }
-            };
+    pub async fn run(mut self) -> Result<(), StreamHandleError> {
+        'oop: loop {
+            // println!("iter!");
+            let mut header_buf = vec![0u8; 5];
+            let mut header_read = 0;
+            while header_read < header_buf.len() {
+                tokio::select! {
+                    res = self.stream.read(&mut header_buf[header_read..]) => {
+                        let n = res?;
+                        if n == 0 {
+                            break 'oop;
+                        }
+                        header_read += n;
+                    }
+                    _ = self.shutdown.changed() => {
+                        self.inner_sender.send(()).unwrap();
+                        return Ok(());
+                    }
+                };
+            }
+
+            let request_type = header_buf[0];
+            // println!("read type {}", request_type);
+            let request_len: u32 = u32::from_le_bytes(header_buf[1..].try_into().unwrap());
+            // println!("read len {}", request_len);
             let mut buf = vec![0u8; request_len as usize];
             tokio::select! {
-                read_result = self.stream_reader.read_exact(&mut buf) => {
+                read_result = self.stream.read_exact(&mut buf) => {
                     read_result?;
                 }
                 _ = self.shutdown.changed() => {
@@ -80,50 +84,62 @@ impl StreamHandler {
                 }
             }
             let request = parse_request(request_type, buf)?;
-            let mut shutdown = self.inner_receiver.clone();
-            let output_stream = Arc::clone(&self.stream_writer);
             let hashtable = Arc::clone(&self.hashtable);
-            tokio::spawn(async move {
-                tokio::select! {
-                    _ = handle_request(request, hashtable,  output_stream) => {}
-                    _ = shutdown.changed() => {}
+            // handle_request(request, hashtable,  &mut self.stream).await;
+            tokio::select! {
+                _ = handle_request(request, hashtable,  &mut self.stream) => {
                 }
-            });
+                _ = shutdown.changed() => {}
+            }
         }
+        Ok(())
     }
 }
 
 async fn handle_request(
     request: Request,
-    hashtable: Arc<PersistentHashtable>,
-    output_stream: Arc<Mutex<OwnedWriteHalf>>,
+    hashtable: Arc<RwLock<PersistentHashtable>>,
+    output_stream: &mut TcpStream,
 ) {
     match request {
         Request::Get(get_request) => {
-            let value = hashtable.get(get_request.key).await.unwrap_or(0);
+            // println!("Get request {}", &get_request.key);
+
+            let value = {
+                let lock = hashtable.read().await;
+                lock.get(get_request.key.into_bytes()).await
+            };
             let response = TGetResponse {
                 request_id: get_request.request_id,
                 offset: value,
             };
             let buf = response.encode_to_vec();
-            let mut stream = output_stream.lock().await;
+            let mut stream = output_stream;
             (*stream).write_u8(GET_RESPONSE).await.unwrap();
             (*stream).write_u32(buf.len() as u32).await.unwrap();
             (*stream).write_all(&buf).await.unwrap();
+            // (*stream).flush().await.unwrap();
         }
         Request::Put(put_request) => {
-            hashtable
-                .set(put_request.key, put_request.offset)
+            // println!("Put request {} {}", &put_request.key, &put_request.offset);
+            let mut lock = hashtable.write().await;
+            lock.set(put_request.key.into_bytes(), put_request.offset)
                 .await
                 .unwrap();
+            // println!("kek");
             let response = TPutResponse {
                 request_id: put_request.request_id,
             };
             let buf = response.encode_to_vec();
-            let mut stream = output_stream.lock().await;
-            (*stream).write_u8(PUT_RESPONSE).await.unwrap();
-            (*stream).write_u32(buf.len() as u32).await.unwrap();
-            (*stream).write_all(&buf).await.unwrap();
+            let mut stream = output_stream;
+            let mut res_buf = vec![1u8; buf.len() + 5];
+            let mut c = Cursor::new(&mut res_buf);
+            c.write_u8(PUT_RESPONSE).await.unwrap();
+            c.write_u32(buf.len() as u32).await.unwrap();
+            c.write_all(&buf).await.unwrap();
+            stream.write_all(&res_buf).await.unwrap();
+            // (*stream).flush().await.unwrap();
+            // println!("Put finished");
         }
     }
 }
