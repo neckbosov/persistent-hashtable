@@ -24,7 +24,6 @@ pub struct StreamHandler {
     hashtable: Arc<PersistentHashtable>,
     shutdown: broadcast::Receiver<()>,
     inner_sender: broadcast::Sender<()>,
-    inner_receiver: broadcast::Receiver<()>,
     // db_error_sender: mpsc::UnboundedSender<DataStorageOperationError>,
     // db_error_receiver: mpsc::UnboundedReceiver<DataStorageOperationError>,
 }
@@ -35,7 +34,7 @@ impl StreamHandler {
         hashtable: Arc<PersistentHashtable>,
         shutdown: broadcast::Receiver<()>,
     ) -> Self {
-        let (inner_sender, inner_receiver) = broadcast::channel(1);
+        let (inner_sender, _) = broadcast::channel(1);
         // let (db_error_sender, db_error_receiver) = mpsc::unbounded_channel();
         let (read_half, write_half) = stream.into_split();
         Self {
@@ -44,7 +43,6 @@ impl StreamHandler {
             hashtable,
             shutdown,
             inner_sender,
-            inner_receiver,
             // db_error_sender,
             // db_error_receiver,
         }
@@ -56,7 +54,7 @@ impl StreamHandler {
                     request_type?
                 }
                 _ = self.shutdown.recv() => {
-                    self.inner_sender.send(());
+                    self.inner_sender.send(()).unwrap();
                     return Ok(());
                 }
             };
@@ -65,7 +63,7 @@ impl StreamHandler {
                     request_len?
                 }
                 _ = self.shutdown.recv() => {
-                    self.inner_sender.send(());
+                    self.inner_sender.send(()).unwrap();
                     return Ok(());
                 }
             };
@@ -75,7 +73,7 @@ impl StreamHandler {
                     read_result?;
                 }
                 _ = self.shutdown.recv() => {
-                    self.inner_sender.send(());
+                    self.inner_sender.send(()).unwrap();
                     return Ok(());
                 }
             }
@@ -84,7 +82,7 @@ impl StreamHandler {
             let output_stream = Arc::clone(&self.stream_writer);
             let hashtable = Arc::clone(&self.hashtable);
             tokio::spawn(async move {
-                handle_request(request, hashtable, shutdown, output_stream);
+                handle_request(request, hashtable, shutdown, output_stream).await;
             });
         }
     }
@@ -105,20 +103,20 @@ async fn handle_request(
             };
             let buf = response.encode_to_vec();
             let mut stream = output_stream.lock().await;
-            (*stream).write_u8(GET_RESPONSE).await;
-            (*stream).write_u32(buf.len() as u32).await;
-            (*stream).write_all(&buf).await;
+            (*stream).write_u8(GET_RESPONSE).await.unwrap();
+            (*stream).write_u32(buf.len() as u32).await.unwrap();
+            (*stream).write_all(&buf).await.unwrap();
         }
         Request::Put(put_request) => {
-            hashtable.set(put_request.key, put_request.offset).await;
+            hashtable.set(put_request.key, put_request.offset).await.unwrap();
             let response = TPutResponse {
                 request_id: put_request.request_id,
             };
             let buf = response.encode_to_vec();
             let mut stream = output_stream.lock().await;
-            (*stream).write_u8(PUT_RESPONSE).await;
-            (*stream).write_u32(buf.len() as u32).await;
-            (*stream).write_all(&buf).await;
+            (*stream).write_u8(PUT_RESPONSE).await.unwrap();
+            (*stream).write_u32(buf.len() as u32).await.unwrap();
+            (*stream).write_all(&buf).await.unwrap();
         }
     }
 }

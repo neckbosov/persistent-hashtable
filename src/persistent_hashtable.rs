@@ -6,7 +6,6 @@ use std::path::PathBuf;
 
 use thiserror::Error;
 use tokio::fs::OpenOptions;
-use tokio::io::AsyncReadExt;
 use tokio::sync::RwLock;
 
 use crate::storage_file::{FILE_SIZE, KeyValue, StorageFile};
